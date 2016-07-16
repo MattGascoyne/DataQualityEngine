@@ -1,0 +1,86 @@
+<?xml version="1.0"?>
+<SqlWorkbenchSqlProject xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Name="500_Functions">
+  <Items>
+    <LogicalFolder Name="Connections" Type="2" Sorted="true">
+      <Items>
+        <ConnectionNode Name="3DCPRI-DDB15\SQLDEV:3DCDEV\EFADEVADMIN42">
+          <Created>2016-02-23T14:05:51.165393+00:00</Created>
+          <Type>SQL</Type>
+          <Server>3DCPRI-DDB15\SQLDEV</Server>
+          <UserName />
+          <Authentication>Windows Authentication</Authentication>
+          <InitialDB>DataQualityDB</InitialDB>
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+      </Items>
+    </LogicalFolder>
+    <LogicalFolder Name="Queries" Type="0" Sorted="true">
+      <Items>
+        <FileNode Name="dbo.fn_ParseText2Table.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>dbo.fn_ParseText2Table.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fCheckDateFormat.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fCheckDateFormat.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fnGetDatatypeEvaluation.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fnGetDatatypeEvaluation.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fnGetParameterValue.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fnGetParameterValue.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fnGetSeverityCode.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fnGetSeverityCode.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fnIsLeapYear.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fnIsLeapYear.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fnRemoveMCharacters.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fnRemoveMCharacters.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fnRemoveSpecialCharacters.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fnRemoveSpecialCharacters.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DQ.fnReturnNumericAlphaMask.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:3DCPRI-DDB15\SQLDEV:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>3DCPRI-DDB15\SQLDEV</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DQ.fnReturnNumericAlphaMask.sql</FullPath>
+        </FileNode>
+      </Items>
+    </LogicalFolder>
+    <LogicalFolder Name="Miscellaneous" Type="3" Sorted="true">
+      <Items />
+    </LogicalFolder>
+  </Items>
+  <SccProjectName>$/Solutions and Projects/MDRLoader/DQEDatabase</SccProjectName>
+  <SccAuxPath />
+  <SccLocalPath>..</SccLocalPath>
+  <SccProvider>MSSCCI:Team Foundation Server MSSCCI Provider</SccProvider>
+</SqlWorkbenchSqlProject>

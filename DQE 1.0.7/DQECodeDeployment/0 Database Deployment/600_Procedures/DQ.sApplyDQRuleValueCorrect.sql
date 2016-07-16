@@ -1,0 +1,665 @@
+USE [DataQualityDB]
+GO
+
+IF EXISTS (SELECT 1 FROM [INFORMATION_SCHEMA].[ROUTINES] 
+				WHERE SPECIFIC_NAME = 'sApplyDQRuleValueCorrect'
+				AND SPECIFIC_SCHEMA = 'DQ') 
+BEGIN 
+	DROP PROC [DQ].[sApplyDQRuleValueCorrect]
+END
+
+GO
+
+CREATE PROC [DQ].[sApplyDQRuleValueCorrect] @RuleEntityAssociationCode int
+, @ParentLoadId INT = 0 
+, @ExecutionSequenceNumber INT = 1
+
+as
+
+/******************************************************************************
+**     Author:       Dartec Systems (Matt Gascoyne)
+**     Created Date: 15/11/2015
+**     Desc: Applies 'Correction'-type cleansing (Such as replace St. with Street)
+**
+**     Return values:
+**
+**     Called by:
+**             
+**     Parameters:
+**     Input
+**     ----------
+--					@RuleEntityAssociationCode		- The rule identifier used to return all of information used to create, log and execute the rule
+**
+**     Output
+**     ----------
+--		Success: None
+--		Failure: RaiseError			
+** 
+*******************************************************************************
+**     Change History
+*******************************************************************************
+**     By:    Date:         Description:
+**     ---    --------      -----------------------------------------------------------
+**     MG     01/03/2016    Release 1.0.3
+*******************************************************************************/
+
+
+DECLARE @EntityName VARCHAR (255)
+		, @Databasename VARCHAR (255)
+		, @SchemaName VARCHAR (255)
+		, @EvaluationColumn VARCHAR (255)
+		--, @OutputColumn VARCHAR (255)
+		--, @StatusColumn VARCHAR (255)
+	
+		, @RuleId VARCHAR (50)
+		, @SourceValue VARCHAR (255)
+		, @PreferredValue VARCHAR (255)
+		, @SQLStmt NVARCHAR (MAX)
+		, @OuterRuleCode VARCHAR (255)
+		, @OuterRuleAssociationName VARCHAR (255)
+		, @OuterEntityName VARCHAR (255)
+		, @OuterEntityCode VARCHAR (255)
+		, @OuterDatabaseName VARCHAR (255)
+		, @OuterSchemaName VARCHAR (255)
+		, @OuterEvaluationColumn VARCHAR (255)
+		, @OuterOutputColumn VARCHAR (255)
+		, @OuterStatusColumn VARCHAR (255)
+		, @OuterOptionalFilterClause VARCHAR (255)
+		, @OuterOptionalFilterClauseWithAND VARCHAR (255) 
+
+		, @RuleCount int
+		, @ParmDefinition NVARCHAR (255)
+		, @SeverityInfo VARCHAR (2)
+		, @SeverityIssue VARCHAR (2)
+		
+		, @FlagRuleSetUsed INT
+		, @FlagRuleUsed INT
+		, @FlagMultipleRulesUsed INT
+
+		, @LoadId INT
+		, @ExecutionId UNIQUEIDENTIFIER = newid()
+		, @RoutineId UNIQUEIDENTIFIER = newId()
+		, @PackageName NVARCHAR (250) = OBJECT_NAME(@@PROCID)
+		, @Error VARCHAR(MAX)
+		, @ErrorNumber INT
+		, @ErrorSeverity VARCHAR (255)
+		, @ErrorState VARCHAR (255)
+		, @ErrorMessage VARCHAR(MAX)
+		, @LoadProcess VARCHAR (255) = NULL
+		, @RuleType VARCHAR (255) = 'RuleValueCorrect'
+		, @FromAndWhereCriteria VARCHAR (8000)
+		, @DQMessage VARCHAR (1000)
+
+BEGIN TRY 
+
+	/* Start Audit*/
+	SET @LoadProcess = 'ExecutionSequence:' + CAST (@ExecutionSequenceNumber AS VARCHAR (5)) + '.Corrections:' +cast (@RuleEntityAssociationCode as varchar (10)) 
+	EXEC [Audit].[sStartRoutineLoad] @ParentLoadId = @ParentLoadId, @ExecutionId= @ExecutionId, @RoutineId = @RoutineId, @PackageName = @PackageName
+			, @RoutineType = 'Stored Procedure' , @LoadProcess = @LoadProcess, @LoadId = @LoadId OUTPUT
+
+	/**** START: Get variable values used through-out****/
+	/* Get severity values */
+	SELECT @SeverityIssue = Code FROM MDS.DQAppSeverity WHERE Name = 'Issue'
+	SELECT @SeverityInfo = Code FROM MDS.DQAppSeverity WHERE Name = 'Info'
+
+	/* Temp table: Used to hold the rule details during the rule checks logic and used as the cursor input.*/
+	CREATE TABLE #RuleValueCorrect 
+	(EntityName VARCHAR (255),
+	DatabaseName VARCHAR (255),
+	SchemaName VARCHAR (255),
+	EvaluationColumn VARCHAR (255),
+	SourceValue VARCHAR (255),
+	PreferredValue VARCHAR (255),
+	RuleId VARCHAR (50)
+	)
+	
+	/* Get rule details needed for metadata operation */
+	SELECT 
+	@OuterRuleCode = REA.Code, 
+	@OuterRuleAssociationName = REA.Name,
+	@OuterEntityName = AE.EntityName, 
+	@OuterEntityCode = AE.Code, 
+	@OuterDatabaseName = AE.[Database], 
+	@OuterSchemaName = AE.[Schema],
+	@OuterEvaluationColumn = REA.EvaluationColumn, 
+	@OuterOutputColumn = REA.OutputColumn, 
+	@OuterStatusColumn = REA.StatusColumn,
+	@OuterOptionalFilterClause = OptionalFilterClause 
+	FROM MDS.DQRuleEntityAssociation REA
+		INNER JOIN MDS.DQAppEntity AE
+			ON REA.DQEntity_Code = AE.Code
+	WHERE REA.Code = @RuleEntityAssociationCode
+	
+	IF LEN (@OuterOptionalFilterClause) > 0
+	BEGIN
+		SET @OuterOptionalFilterClauseWithAND = ' AND ' + @OuterOptionalFilterClause
+		SET @OuterOptionalFilterClause = ' WHERE ' + @OuterOptionalFilterClause
+	END
+	ELSE 
+	BEGIN
+		SET @OuterOptionalFilterClauseWithAND = ''
+		SET @OuterOptionalFilterClause = ''
+	END
+	/**** END: Get variable values used through-out****/
+
+	/**************************************************/
+	PRINT 'START: Managing Cleansing table structure'
+	PRINT 'The existence of an output & status column is manadatory. If these are not specified the code will create them.'
+
+	IF  LEN (COALESCE (@OuterOutputColumn, '')) > 0 -- Check something is there.
+	BEGIN
+		SET @SQLStmt = 'declare @sqlstmt varchar (max)
+		IF NOT EXISTS (SELECT * FROM ' + @OuterDatabaseName + '.INFORMATION_SCHEMA.COLUMNS where TABLE_SCHEMA = '''+@OuterSchemaName+''' AND TABLE_NAME = '''+@OuterEntityName+'''
+										 AND COLUMN_NAME = '''+@OuterOutputColumn+''')
+			BEGIN 
+				ALTER TABLE '+@OuterDatabaseName+'.'+@OuterSchemaName+'.'+@OuterEntityName+' ADD '+@OuterOutputColumn+' VARCHAR (255) null
+			END
+		ELSE 
+			BEGIN
+				SET @sqlstmt = ''UPDATE '+@OuterDatabaseName+'.'+@OuterSchemaName+'.'+@OuterEntityName+' SET '+@OuterOutputColumn+' = NULL''
+				EXEC (@sqlstmt)
+			END'
+		print @SQLStmt
+		/* Log to execution table*/
+		EXEC [DQ].[sInsertRuleExecutionHistory] 	
+			@DatabaseName = @OuterDatabaseName, 
+			@SchemaName  = @OuterSchemaName, 
+			@EntityName=  @OuterEntityName, 
+			@RuleId = @RuleEntityAssociationCode,
+			@RuleType = @RuleType,
+			@RuleSQL = @SQLStmt, 
+			@ParentLoadId  = @LoadId,
+			@RuleSQLDescription = 'Metadata: Create defined Output column'
+		EXEC (@SQLStmt)
+	END
+	else IF LEN (COALESCE (@OuterOutputColumn, '')) = 0 -- Check NOTHING is there. 
+		BEGIN 
+			PRINT 'Set output column to be the evaluation column.'
+			SET @OuterOutputColumn = @OuterEvaluationColumn
+		END
+	
+	IF  LEN (COALESCE (@OuterStatusColumn, '')) > 0 -- Check something is there.
+		BEGIN 
+			SET @SQLStmt = 'declare @sqlstmt varchar (max)
+			IF NOT EXISTS (SELECT * FROM ' + @OuterDatabaseName + '.INFORMATION_SCHEMA.COLUMNS where TABLE_SCHEMA = '''+@OuterSchemaName+''' AND TABLE_NAME = '''+@OuterEntityName+'''
+											AND COLUMN_NAME = '''+@OuterStatusColumn+''')
+				BEGIN 
+					ALTER TABLE '+@OuterDatabaseName+'.'+@OuterSchemaName+'.'+@OuterEntityName+' ADD '+@OuterStatusColumn+' VARCHAR (255) null
+				END
+			ELSE 
+				BEGIN
+					SET @sqlstmt = ''UPDATE '+@OuterDatabaseName+'.'+@OuterSchemaName+'.'+@OuterEntityName+' SET '+@OuterStatusColumn+' = NULL''
+					EXEC (@sqlstmt)
+				END
+			'
+			print @SQLStmt
+			/* Log to execution table*/
+			EXEC [DQ].[sInsertRuleExecutionHistory] 	
+				@DatabaseName = @OuterDatabaseName, 
+				@SchemaName  = @OuterSchemaName, 
+				@EntityName=  @OuterEntityName, 
+				@RuleId = @RuleEntityAssociationCode,
+				@RuleType = @RuleType,
+				@RuleSQL = @SQLStmt, 
+				@ParentLoadId  = @LoadId,
+				@RuleSQLDescription = 'Metadata: Create defined Status column'
+			 EXEC (@SQLStmt)
+		END
+	ELSE IF  LEN (COALESCE (@OuterStatusColumn, '')) = 0 -- Check something is there.
+		BEGIN 
+			PRINT 'Create default status column.'
+			SET @OuterStatusColumn = 'StatusColRule_' + @OuterRuleCode 
+			SET @SQLStmt = 'declare @sqlstmt varchar (max)
+			IF NOT EXISTS (SELECT * FROM ' + @OuterDatabaseName + '.INFORMATION_SCHEMA.COLUMNS where TABLE_SCHEMA = '''+@OuterSchemaName+''' AND TABLE_NAME = '''+@OuterEntityName+'''
+											AND COLUMN_NAME = '''+@OuterStatusColumn+''')
+				BEGIN 
+					ALTER TABLE '+@OuterDatabaseName+'.'+@OuterSchemaName+'.'+@OuterEntityName+' ADD '+@OuterStatusColumn+' VARCHAR (255) null
+				END
+			ELSE 
+				BEGIN
+					SET @sqlstmt = ''UPDATE '+@OuterDatabaseName+'.'+@OuterSchemaName+'.'+@OuterEntityName+' SET '+@OuterStatusColumn+' = NULL''
+					EXEC (@sqlstmt)
+				END
+			'
+			print @SQLStmt
+			/* Log to execution table*/
+			EXEC [DQ].[sInsertRuleExecutionHistory] 	
+				@DatabaseName = @OuterDatabaseName, 
+				@SchemaName  = @OuterSchemaName, 
+				@EntityName=  @OuterEntityName, 
+				@RuleId = @RuleEntityAssociationCode,
+				@RuleType = @RuleType,
+				@RuleSQL = @SQLStmt, 
+				@ParentLoadId  = @LoadId,
+				@RuleSQLDescription = 'Metadata: Create default Status column'
+			 EXEC (@SQLStmt)
+		END
+
+	PRINT 'END: Managing Cleansing table structure'
+	
+	/**************************************************/
+	PRINT 'START: Check rule details and build input for cursor'
+	
+	SELECT 
+		@FlagRuleSetUsed = CASE WHEN LEN (RuleSet_Code) > 0 THEN 1 
+				ELSE 0 END,
+		@FlagRuleUsed = CASE WHEN LEN (ValueCorrectionRule_Code) > 0 THEN 1 
+				ELSE 0 END,
+		@FlagMultipleRulesUsed = CASE WHEN LEN (ProfilingRule_Code) > 0 THEN 1
+										WHEN LEN (HarmonizationRule_Code) > 0 THEN 1
+										WHEN LEN (ReferenceRule_Code) > 0 THEN 1
+										WHEN LEN (ExpressionRule_Code) > 0 THEN 1
+										ELSE 0 END
+	--select *
+	FROM MDS.DQRuleEntityAssociation REA
+	WHERE Code = @RuleEntityAssociationCode
+	
+	IF COL_LENGTH (''+@OuterDatabaseName+'.'+@OuterSchemaName+'.'+@OuterEntityName+'', @OuterEvaluationColumn) is null 
+	BEGIN
+		EXEC [DQ].[sInsertDataQualityHistory] 
+			@LoadId =  @LoadId, 
+			@EntityCode = @OuterEntityCode,  
+			@Databasename =@OuterDatabaseName , 
+			@SchemaName = @OuterSchemaName, 	
+			@EntityName = @OuterEntityName, 	
+			@EvaluationColumn = @OuterEvaluationColumn, 
+			@SeverityInfo = @SeverityInfo,  
+			@SeverityName = 'Fatal' , 
+			@RuleId = 0 , 
+			@RuleSQLDescription = 'Pre-Rules Checks: Existence of evaluation column value.', 	
+			@RuleType  = @RuleType, 	
+			@RuleEntityAssociationCode  = @RuleEntityAssociationCode, 
+			@RuleEntityAssociationName = @OuterRuleAssociationName, 
+			@CheckName = 'Rules Error', 
+			@DQMessage  =  'Error: No Evaluation column defined.',
+			@RowsAffected = @RuleCount
+			--@Debug = 1
+
+
+	    RAISERROR ('Error: No Evaluation column defined.', 16, 1);	
+	END
+	
+	/* Flag multiple  rule definitions*/
+	IF @FlagMultipleRulesUsed = 1
+	BEGIN
+		EXEC [DQ].[sInsertDataQualityHistory] 
+			@LoadId =  @LoadId, 
+			@EntityCode = @OuterEntityCode,  
+			@Databasename =@OuterDatabaseName , 
+			@SchemaName = @OuterSchemaName, 	
+			@EntityName = @OuterEntityName, 	
+			@EvaluationColumn = @OuterEvaluationColumn, 
+			@SeverityInfo = @SeverityInfo,  
+			@SeverityName = 'Fatal' , 
+			@RuleId = 0 , 
+			@RuleSQLDescription = 'Pre-Rules Checks: Check for multiple rule definitions.', 	
+			@RuleType  = @RuleType, 	
+			@RuleEntityAssociationCode  = @RuleEntityAssociationCode, 
+			@RuleEntityAssociationName = @OuterRuleAssociationName, 
+			@CheckName = 'Rules Error', 
+			@DQMessage  =  'Error: Multiple OR incorrect have been assigned.',
+			@RowsAffected = @RuleCount
+
+	    RAISERROR ('Error: Multiple or incorrect rules assigned.', 16, 1);
+	END
+
+	/* Flag missing rule definitions*/
+	IF @FlagRuleSetUsed = 0 AND @FlagRuleUsed = 0
+	BEGIN
+		EXEC [DQ].[sInsertDataQualityHistory] 
+			@LoadId =  @LoadId, 
+			@EntityCode = @OuterEntityCode,  
+			@Databasename =@OuterDatabaseName , 
+			@SchemaName = @SchemaName, 	
+			@EntityName = @EntityName, 	
+			@EvaluationColumn = @EvaluationColumn, 
+			@SeverityInfo = @SeverityInfo,  
+			@SeverityName = 'Fatal' , 
+			@RuleId = 0 , 
+			@RuleSQLDescription = 'Pre-Rules Checks: Check for missing rule definitions.', 	
+			@RuleType  = @RuleType, 	
+			@RuleEntityAssociationCode  = @RuleEntityAssociationCode, 
+			@RuleEntityAssociationName = @OuterRuleAssociationName, 
+			@CheckName = 'Missing rules', 
+			@DQMessage  =  'Error: No Rule or Ruleset defined.',
+			@RowsAffected = @RuleCount
+
+	    RAISERROR ('Error: No Rule or Ruleset defined.', 16, 1);
+	END
+
+	/* Use the Rule rather than ruleset*/
+	IF @FlagRuleUsed = 1
+	BEGIN
+		SET @SQLStmt = '
+			INSERT INTO #RuleValueCorrect
+			SELECT -- *
+			AE.EntityName AS EntityName, AE.[Database] as DatabaseName, AE.[Schema] AS SchemaName, REA.EvaluationColumn AS EvaluationColumn, SourceValue, PreferredValue
+			, RVC.Code
+			FROM MDS.DQRuleEntityAssociation REA
+				INNER JOIN MDS.DQAppEntity AE
+					ON REA.DQEntity_Code = AE.Code
+				INNER JOIN MDS.DQRuleValueCorrection RVC
+					on REA.ValueCorrectionRule_Code = RVC.Code
+			WHERE REA.IsActive_Name = ''Yes''
+			AND RVC.IsActive_Name = ''Yes''
+			AND REA.Code = ' + CAST (@RuleEntityAssociationCode AS VARCHAR (255)) +''
+	END
+
+	/* Use the Ruleset because no rule is defined*/
+	IF @FlagRuleSetUsed = 1 AND @FlagRuleUsed = 0
+	BEGIN
+		SET @SQLStmt = '
+		INSERT INTO #RuleValueCorrect
+		SELECT -- *
+		AE.EntityName AS EntityName, AE.[Database] as DatabaseName, AE.[Schema] AS SchemaName, REA.EvaluationColumn AS EvaluationColumn, SourceValue, PreferredValue
+		, RVC.Code
+		FROM MDS.DQRuleEntityAssociation REA
+			INNER JOIN MDS.DQAppEntity AE
+				ON REA.DQEntity_Code = AE.Code
+			INNER JOIN MDS.DQRuleValueCorrection RVC
+				on REA.Ruleset_Code = RVC.Ruleset_Code
+		WHERE REA.IsActive_Name = ''Yes''
+		AND RVC.IsActive_Name = ''Yes''
+		AND REA.Code = '+ CAST (@RuleEntityAssociationCode AS VARCHAR (255)) +''
+	END
+
+	--select * from #RuleValueCorrect
+	EXEC [DQ].[sInsertRuleExecutionHistory] 	
+		@DatabaseName = @OuterDatabaseName, 
+		@SchemaName  = @OuterSchemaName, 
+		@EntityName=  @OuterEntityName, 
+		@RuleId = @RuleEntityAssociationCode,
+		@RuleType = @RuleType,
+		@RuleSQL = @SQLStmt, 
+		@ParentLoadId  = @LoadId,
+		@RuleSQLDescription = 'Pre-Rules Checks: Load working temporary table used by rules process.'
+	EXEC (@SQLStmt)
+	PRINT @SQLStmt
+	select * from #RuleValueCorrect
+
+	PRINT 'END: Check rule details and build input for cursor'
+	/**************************************************/
+	PRINT 'START: Apply Value Correction Rules'
+
+	IF CURSOR_STATUS('global','CSR_RuleValueCorrection')>=-1
+	BEGIN
+	 DEALLOCATE CSR_RuleValueCorrection
+	END
+	
+	DECLARE CSR_RuleValueCorrection CURSOR FORWARD_ONLY FOR
+	
+		SELECT * 
+		FROM #RuleValueCorrect
+
+	OPEN CSR_RuleValueCorrection
+	FETCH NEXT FROM CSR_RuleValueCorrection INTO @EntityName, @Databasename, @SchemaName, @EvaluationColumn,  @SourceValue, @PreferredValue, @RuleId
+
+
+		WHILE (@@FETCH_STATUS = 0)
+		BEGIN
+
+		PRINT 'START: Run rules cursor'
+		PRINT 'START: RuleCode: ' +  @OuterRuleCode + ' '+@OuterRuleAssociationName		
+
+		/* START: Update those records that Match the value specified in the Source value */
+		SET @SQLStmt = 'UPDATE ' +@OuterDatabaseName+ '.'+ @SchemaName + '.' +@EntityName + 
+						' SET '+ @OuterOutputColumn +' = '''+ @PreferredValue + '''' +
+						' , '+@OuterStatusColumn+' = ''Corrected'' ' 
+		IF @SourceValue = 'NULL'
+			BEGIN
+				SET @SQLStmt = @SQLStmt + ' WHERE '+@OuterStatusColumn+' IS NULL AND ' + @EvaluationColumn + ' IS NULL '+ @OuterOptionalFilterClauseWithAND  -- MG Fix20160622
+			END
+		ELSE 
+			BEGIN
+				SET @SQLStmt = @SQLStmt + ' WHERE '+@OuterStatusColumn+' IS NULL AND ' + @EvaluationColumn + ' = ''' + @SourceValue + '''
+					' +@OuterOptionalFilterClauseWithAND    -- MG Fix20160622
+			END
+					
+		PRINT @SQLStmt
+		EXEC [DQ].[sInsertRuleExecutionHistory] 	
+			@DatabaseName = @OuterDatabaseName, 
+			@SchemaName  = @OuterSchemaName, 
+			@EntityName=  @OuterEntityName, 
+			@RuleId = @RuleEntityAssociationCode,
+			@RuleType = @RuleType,
+			@RuleSQL = @SQLStmt, 
+			@ParentLoadId  = @LoadId,
+			@RuleSQLDescription = 'Rules: Value Correct - Update existing with perferred value.'	
+		exec (@SQLStmt)
+		/* END: Update those records that Match the value specified in the Source value */
+
+		/* START: Update those records that Match the value specified in the Preferred value */
+		SET @SQLStmt = 'UPDATE ' +@OuterDatabaseName+ '.'+ @SchemaName + '.' +@EntityName + 
+						' SET '+ @OuterOutputColumn +' = '''+ @PreferredValue + '''' +
+						' , '+@OuterStatusColumn+' = ''Correct'''
+		IF @SourceValue = 'NULL'
+			BEGIN
+				SET @SQLStmt = @SQLStmt + ' WHERE '+@OuterStatusColumn+' IS NULL AND ' + @EvaluationColumn + ' IS NULL '+ @OuterOptionalFilterClauseWithAND    -- MG Fix20160622
+			END
+		ELSE 
+			BEGIN
+				SET @SQLStmt = @SQLStmt + ' WHERE '+@OuterStatusColumn+' IS NULL AND ' + @EvaluationColumn + ' = ''' + @PreferredValue + '''
+					' +@OuterOptionalFilterClauseWithAND    -- MG Fix20160622
+			END
+					
+		PRINT @SQLStmt
+		EXEC [DQ].[sInsertRuleExecutionHistory] 	
+			@DatabaseName = @OuterDatabaseName, 
+			@SchemaName  = @OuterSchemaName, 
+			@EntityName=  @OuterEntityName, 
+			@RuleId = @RuleEntityAssociationCode,
+			@RuleType = @RuleType,
+			@RuleSQL = @SQLStmt, 
+			@ParentLoadId  = @LoadId,
+			@RuleSQLDescription = 'Rules: Value Correct - Update existing with perferred value.'	
+		exec (@SQLStmt)
+		/* END: Update those records that Match the value specified in the Preferred value */
+
+		PRINT 'END: Apply Value Correction Rules'
+
+		FETCH NEXT FROM CSR_RuleValueCorrection INTO @EntityName, @Databasename, @SchemaName, @EvaluationColumn, @SourceValue, @PreferredValue, @RuleId
+		END
+	CLOSE CSR_RuleValueCorrection
+	DEALLOCATE CSR_RuleValueCorrection
+
+	SET @SQLStmt = 'UPDATE ' +@OuterDatabaseName+ '.'+ @SchemaName + '.' +@EntityName 
+					+ ' SET '+@OuterOutputColumn+' = '+@EvaluationColumn+''
+					+ ' , '+@OuterStatusColumn+' = ''Warning: No Rule Applied'''
+					+ ' WHERE '+@OuterStatusColumn+' IS NULL
+					' + @OuterOptionalFilterClauseWithAND 
+	PRINT @SQLStmt
+	EXEC [DQ].[sInsertRuleExecutionHistory] 	
+		@DatabaseName = @OuterDatabaseName, 
+		@SchemaName  = @OuterSchemaName, 
+		@EntityName=  @OuterEntityName, 
+		@RuleId = @RuleEntityAssociationCode,
+		@RuleType = @RuleType,
+		@RuleSQL = @SQLStmt, 
+		@ParentLoadId  = @LoadId,
+		@RuleSQLDescription = 'Rules: Value Correct - Flag where no rule applies.'
+	EXEC (@SQLStmt)
+	/**** END: Apply Value Correction Rules****/
+
+	/**************************************************/
+
+	/**** START: Log results to DQL History table****/
+	/* Existing correct records */
+	SET @SQLStmt = 'SELECT @CountOUT = COUNT (*) FROM '+@OuterDatabaseName+ '.'+ @SchemaName + '.' +@EntityName 
+					+ ' WHERE ' + @OuterStatusColumn + ' = ''Correct'''
+	PRINT @SQLStmt
+	EXEC [DQ].[sInsertRuleExecutionHistory] 	
+		@DatabaseName = @OuterDatabaseName, 
+		@SchemaName  = @OuterSchemaName, 
+		@EntityName=  @OuterEntityName, 
+		@RuleId = @RuleEntityAssociationCode,
+		@RuleType = @RuleType,
+		@RuleSQL = @SQLStmt, 
+		@ParentLoadId  = @LoadId,
+		@RuleSQLDescription = 'Rules: Value Correct - Get number of records already correct.'
+	SET  @ParmDefinition = '@CountOUT INT OUTPUT'
+	EXECUTE sp_executesql @SQLStmt, @ParmDefinition , @CountOUT = @RuleCount OUTPUT;
+	select @RuleCount
+
+	/* Insert to History summary table*/
+	SET @DQMessage = 'Ignored: Number of records that were already correct.'
+	EXEC [DQ].[sInsertDataQualityHistory] 
+		@LoadId =  @LoadId, 
+		@EntityCode = @OuterEntityCode,  
+		@Databasename =@OuterDatabaseName , 
+		@SchemaName = @OuterSchemaName, 	
+		@EntityName = @OuterEntityName, 	
+		@EvaluationColumn = @OuterEvaluationColumn, 
+		@SeverityInfo = @SeverityInfo,  
+		@SeverityName = 'Info' , 
+		@RuleId = @RuleId ,
+		@RuleSQLDescription = 'Rules: Value Correct - Insert correct records result to History table.',
+		@RuleType  = @RuleType, 	
+		@RuleEntityAssociationCode  = @RuleEntityAssociationCode, 
+		@RuleEntityAssociationName = @OuterRuleAssociationName, 
+		@CheckName = 'ValueCorrections', 
+		@DQMessage  = @DQMessage,
+		@RowsAffected = @RuleCount
+
+	/* Corrected records */
+	SET @SQLStmt = 'SELECT @CountOUT = COUNT (*) FROM '+@OuterDatabaseName+ '.'+ @SchemaName + '.' +@EntityName 
+					+ ' WHERE ' + @OuterStatusColumn + ' = ''Corrected'''
+	PRINT @SQLStmt
+	EXEC [DQ].[sInsertRuleExecutionHistory] 	
+		@DatabaseName = @OuterDatabaseName, 
+		@SchemaName  = @OuterSchemaName, 
+		@EntityName=  @OuterEntityName, 
+		@RuleId = @RuleEntityAssociationCode,
+		@RuleType = @RuleType,
+		@RuleSQL = @SQLStmt, 
+		@ParentLoadId  = @LoadId,
+		@RuleSQLDescription = 'Rules: Value Correct - Get number of records corrected.'
+	SET  @ParmDefinition = '@CountOUT INT OUTPUT'
+	EXECUTE sp_executesql @SQLStmt, @ParmDefinition , @CountOUT = @RuleCount OUTPUT;
+	select @RuleCount
+
+	/* Insert to History summary table*/
+	SET @DQMessage = 'CORRECTED: Number of records that were corrected.'
+	EXEC [DQ].[sInsertDataQualityHistory] 
+		@LoadId =  @LoadId, 
+		@EntityCode = @OuterEntityCode,  
+		@Databasename =@OuterDatabaseName , 
+		@SchemaName = @OuterSchemaName, 	
+		@EntityName = @OuterEntityName, 	
+		@EvaluationColumn = @EvaluationColumn, 
+		@SeverityInfo = @SeverityInfo,  
+		@SeverityName = 'Info' , 
+		@RuleId = @RuleId , 
+		@RuleSQLDescription = 'Rules: Value Correct - Insert corrected records result to History table.',
+		@RuleType  = @RuleType, 	
+		@RuleEntityAssociationCode  = @RuleEntityAssociationCode, 
+		@RuleEntityAssociationName = @OuterRuleAssociationName, 
+		@CheckName = 'ValueCorrections', 
+		@DQMessage  = @DQMessage,
+		@RowsAffected = @RuleCount
+
+	/* Missing rules */
+	SET @SQLStmt = 'SELECT @CountOUT = COUNT (*) FROM '+@OuterDatabaseName+ '.'+ @SchemaName + '.' +@EntityName 
+					+ ' WHERE ' + @OuterStatusColumn + ' = ''Warning: No Rule Applied'''
+	PRINT @SQLStmt
+	EXEC [DQ].[sInsertRuleExecutionHistory] 	
+		@DatabaseName = @OuterDatabaseName, 
+		@SchemaName  = @OuterSchemaName, 
+		@EntityName=  @OuterEntityName, 
+		@RuleId = @RuleEntityAssociationCode,
+		@RuleType = @RuleType,
+		@RuleSQL = @SQLStmt, 
+		@ParentLoadId  = @LoadId,
+		@RuleSQLDescription = 'Rules: Value Correct - Get number of records where no rule applies.'
+	SET  @ParmDefinition = '@CountOUT INT OUTPUT'
+	EXECUTE sp_executesql @SQLStmt, @ParmDefinition , @CountOUT=@RuleCount OUTPUT;
+
+	PRINT 'Flag if any records exist outside the correction rules.'
+	IF @RuleCount > 0
+	BEGIN
+		SET @DQMessage = 'Warning: No rules applied.'
+		EXEC [DQ].[sInsertDataQualityHistory] 
+			@LoadId =  @LoadId, 
+			@EntityCode = @OuterEntityCode,  
+			@Databasename =@OuterDatabaseName , 
+			@SchemaName = @OuterSchemaName, 	
+			@EntityName = @OuterEntityName, 	
+			@EvaluationColumn = @OuterEvaluationColumn, 
+			@SeverityInfo = @SeverityInfo,  
+			@SeverityName = 'Info' , 
+			@RuleId = @RuleId , 
+			@RuleSQLDescription = 'Rules: Value Correct - Insert records where no rule applies to History table.',
+			@RuleType  = @RuleType, 	
+			@RuleEntityAssociationCode  = @RuleEntityAssociationCode, 
+			@RuleEntityAssociationName = @OuterRuleAssociationName, 
+			@CheckName = 'ValueCorrections', 
+			@DQMessage  = @DQMessage,
+			@RowsAffected = @RuleCount
+
+	END
+	/**** End: Log results to DQL History table****/
+
+	/* Insert CORRECTED rows to the DataQualityRowHistory table*/
+		SET @FromAndWhereCriteria =  ' FROM '+@OuterDatabaseName+ '.'+ @SchemaName + '.' +@EntityName + ' AS A
+										WHERE ' + @OuterStatusColumn + ' = ''Corrected'''
+		SET @DQMessage = 'CORRECTED: ''+ cast (' + @EvaluationColumn + ' as varchar (255)) +'' <TO> ''+ cast (' + @OuterOutputColumn + ' as varchar (255)) +'''
+		PRINT @DQMessage
+
+		EXEC [DQ].[sInsertDataQualityRowHistory] 
+			@LoadId =  @LoadId, 
+			@EntityCode = @OuterEntityCode,  
+			@Databasename =@OuterDatabaseName , 
+			@SchemaName = @OuterSchemaName, 	
+			@EntityName = @OuterEntityName, 	
+			@EvaluationColumn = @OuterEvaluationColumn, 
+			@SeverityInfo = @SeverityInfo,  
+			@SeverityName = 'Info' , 
+			@RuleId = @RuleId , 
+			@RuleSQLDescription = 'Rules: Value Correct - Insert corrected records result to History Row table.',
+			@RuleType  = @RuleType, 	
+			@RuleEntityAssociationCode  = @RuleEntityAssociationCode, 
+			@RuleEntityAssociationName = @OuterRuleAssociationName, 
+			@CheckName = @EvaluationColumn, 
+			@DQMessage  = @DQMessage,
+			@RowsAffected = 1, 	
+			@FromAndWhereCriteria = @FromAndWhereCriteria
+	
+	PRINT 'Insert Primary Key Values'
+	EXEC DQ.sInsertPrimaryKeyValues
+		@RuleEntityAssociationCode = @OuterRuleCode
+		, @EntityCode = @OuterEntityCode
+		, @ParentLoadId = @LoadId
+		, @DatabaseName = @OuterDatabaseName
+		, @SchemaName = @OuterSchemaName
+		, @EntityName =  @OuterEntityName
+		, @RuleType = @RuleType
+
+	/* End Audit as Success*/
+	EXEC [Audit].[sEndRoutineLoad] @LoadId = @LoadId, @LoadStatusShortName = 'SUCCESS'
+
+END TRY
+BEGIN CATCH
+	SET @ErrorSeverity = '10' -- CONVERT(VARCHAR(255), ERROR_SEVERITY())
+	SET @ErrorState = CONVERT(VARCHAR(255), ERROR_STATE())
+	SET @ErrorNumber = CONVERT(VARCHAR(255), ERROR_NUMBER())
+
+	SET @Error =
+		'(Proc: ' + OBJECT_NAME(@@PROCID)
+		+ ' Line: ' + CONVERT(VARCHAR(255), ERROR_LINE())
+		+ ' Number: ' + CONVERT(VARCHAR(255), ERROR_NUMBER())
+		+ ' Severity: ' + CONVERT(VARCHAR(255), ERROR_SEVERITY())
+		+ ' State: ' + CONVERT(VARCHAR(255), ERROR_STATE())
+		+ ') '
+		+ CONVERT(VARCHAR(255), ERROR_MESSAGE())
+
+	/* Create a tidy error message*/
+	SET @Error = @Error 
+
+	/* Stamp the routine load value as failure*/
+	EXEC [Audit].[sEndRoutineLoad] @LoadId = @LoadId, @LoadStatusShortName = 'FAILURE'
+	/* Record the nature of the failure*/
+	EXEC [Audit].[sRoutineErrorStamp] @LoadId = @LoadId, @ErrorCode = @ErrorNumber, @ErrorDescription = @Error, @SourceName=  @PackageName 
+
+	/*Raise an error*/
+	RAISERROR (@Error, @ErrorSeverity, @ErrorState) WITH NOWAIT
+
+END CATCH
