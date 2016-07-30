@@ -46,7 +46,7 @@ echo *******************************START: CREATE DATAQUALITYDB*****************
 echo . >> %logfile%
 
 ECHO sqlcmd -S %DataQualityDBservername% -i "%~dp0\99.DeploymentScripts\0.CreateDataQualityDB.sql" -v dbFilePath=%dbFilePath% dbLogPath="%dbLogPath%" >> %logfile%
-sqlcmd -S %DataQualityDBservername% -i "%~dp0\99.DeploymentScripts\0.CreateDataQualityDB.sql" -v dbFilePath=%dbFilePath% dbLogPath="%dbLogPath%" >> %logfile%
+sqlcmd -S %DataQualityDBservername% -i "%~dp0\99.DeploymentScripts\0.CreateDataQualityDB.sql" -v dbFilePath=%dbFilePath% dbLogPath=%dbLogPath% >> %logfile%
 
 IF %errorlevel% NEQ 0 GOTO :OnError
 
